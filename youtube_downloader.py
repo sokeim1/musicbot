@@ -37,34 +37,43 @@ class YouTubeDownloader:
             'quiet': True,
             'no_warnings': True,
             'outtmpl': '%(id)s.%(ext)s',
-            # Расширенные настройки для обхода защиты YouTube
+            # Максимально агрессивные настройки для обхода защиты YouTube
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'web', 'ios'],
+                    'player_client': ['android_creator', 'android_music', 'android', 'ios_music', 'ios'],
                     'skip': ['hls', 'dash'],
-                    'player_skip': ['configs'],
+                    'player_skip': ['configs', 'webpage'],
+                    'innertube_host': 'youtubei.googleapis.com',
+                    'innertube_key': None,
                 }
             },
             'geo_bypass': True,
-            'geo_bypass_country': 'DE',  # Германия
+            'geo_bypass_country': 'DE',
             'nocheckcertificate': True,
             'prefer_insecure': True,
             'socket_timeout': 60,
             'http_chunk_size': 1048576,
-            # Дополнительные заголовки для обхода детекции ботов
+            # Продвинутые заголовки для имитации реального браузера
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Linux; Android 11; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; SM-G998B) gzip',
+                'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/',
                 'DNT': '1',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
             },
-            # Дополнительные опции
+            # Дополнительные опции для обхода
             'age_limit': None,
             'writesubtitles': False,
             'writeautomaticsub': False,
+            'ignoreerrors': False,
+            'no_color': True,
+            'extract_flat': False,
         }
         
         logger.info("YouTube downloader инициализирован с обходом защиты ботов")
@@ -181,24 +190,39 @@ class YouTubeDownloader:
         """Синхронное скачивание через yt-dlp с несколькими методами"""
         max_retries = 3
         
-        # Разные конфигурации для попыток
+        # Пробуем разные форматы URL
+        urls_to_try = [url]
+        if 'youtube.com' in url or 'youtu.be' in url:
+            video_id = url.split('v=')[-1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+            urls_to_try.extend([
+                f"https://www.youtube.com/watch?v={video_id}",
+                f"https://youtu.be/{video_id}",
+                f"https://m.youtube.com/watch?v={video_id}"
+            ])
+        
+        # Удаляем дубликаты
+        urls_to_try = list(dict.fromkeys(urls_to_try))
+        
+        # Разные конфигурации для попыток (от самых надежных к менее надежным)
         configs = [
-            # Попытка 1: Android клиент
-            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['android']}}},
-            # Попытка 2: iOS клиент
-            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['ios']}}},
-            # Попытка 3: Web клиент с дополнительными заголовками
-            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['web']}}}
+            # Попытка 1: Android Creator (самый надежный)
+            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['android_creator']}}},
+            # Попытка 2: Android Music
+            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['android_music']}}},
+            # Попытка 3: Обычный Android
+            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['android']}}}
         ]
         
         for attempt in range(max_retries):
             try:
                 config = configs[attempt] if attempt < len(configs) else self.ydl_opts_download
-                logger.info(f"Попытка скачивания {attempt + 1}/{max_retries}: {url}")
+                current_url = urls_to_try[attempt % len(urls_to_try)]
+                
+                logger.info(f"Попытка скачивания {attempt + 1}/{max_retries}: {current_url}")
                 logger.info(f"Используется клиент: {config['extractor_args']['youtube']['player_client']}")
                 
                 with yt_dlp.YoutubeDL(config) as ydl:
-                    info = ydl.extract_info(url, download=True)
+                    info = ydl.extract_info(current_url, download=True)
                     
                     if not info:
                         logger.warning("Не удалось получить информацию о видео")
@@ -223,12 +247,22 @@ class YouTubeDownloader:
                 # Проверяем специфичные ошибки YouTube
                 if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
                     logger.warning("YouTube требует аутентификацию, пробуем другой клиент...")
+                    # Добавляем случайную задержку для имитации человеческого поведения
+                    import random
+                    delay = random.uniform(1, 3)
+                    logger.info(f"Случайная задержка: {delay:.1f} сек")
+                    import time
+                    time.sleep(delay)
                 elif "Video unavailable" in error_msg:
                     logger.error("Видео недоступно")
                     return None
                 elif "Private video" in error_msg:
                     logger.error("Приватное видео")
                     return None
+                elif "age-restricted" in error_msg.lower():
+                    logger.warning("Видео с возрастными ограничениями, пробуем обойти...")
+                elif "blocked" in error_msg.lower():
+                    logger.warning("Видео заблокировано, пробуем другой метод...")
                 
                 if attempt == max_retries - 1:
                     logger.error("Все попытки исчерпаны")
