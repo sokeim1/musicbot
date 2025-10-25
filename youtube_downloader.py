@@ -23,25 +23,51 @@ class YouTubeDownloader:
             'extract_flat': True,
             'socket_timeout': 30,
             'nocheckcertificate': True,
+            # Обход защиты YouTube
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['hls', 'dash']
+                }
+            },
         }
         
         self.ydl_opts_download = {
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[height<=480]',
             'quiet': True,
             'no_warnings': True,
             'outtmpl': '%(id)s.%(ext)s',
-            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}},
+            # Расширенные настройки для обхода защиты YouTube
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web', 'ios'],
+                    'skip': ['hls', 'dash'],
+                    'player_skip': ['configs'],
+                }
+            },
             'geo_bypass': True,
-            'geo_bypass_country': 'US',
+            'geo_bypass_country': 'DE',  # Германия
             'nocheckcertificate': True,
             'prefer_insecure': True,
             'socket_timeout': 60,
-            'http_chunk_size': 1048576,  # 1MB чанки
-            # Без конвертации - скачиваем как есть (m4a/webm/mp4)
-            # Telegram поддерживает эти форматы
+            'http_chunk_size': 1048576,
+            # Дополнительные заголовки для обхода детекции ботов
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 11; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            },
+            # Дополнительные опции
+            'age_limit': None,
+            'writesubtitles': False,
+            'writeautomaticsub': False,
         }
         
-        logger.info("YouTube downloader инициализирован без прокси")
+        logger.info("YouTube downloader инициализирован с обходом защиты ботов")
     
     async def search(self, query: str, limit: int = 10) -> List[Dict[str, str]]:
         """
@@ -152,14 +178,26 @@ class YouTubeDownloader:
             return None
     
     def _download_sync(self, url: str) -> Optional[str]:
-        """Синхронное скачивание через yt-dlp"""
-        max_retries = 2
+        """Синхронное скачивание через yt-dlp с несколькими методами"""
+        max_retries = 3
+        
+        # Разные конфигурации для попыток
+        configs = [
+            # Попытка 1: Android клиент
+            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['android']}}},
+            # Попытка 2: iOS клиент
+            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['ios']}}},
+            # Попытка 3: Web клиент с дополнительными заголовками
+            {**self.ydl_opts_download, 'extractor_args': {'youtube': {'player_client': ['web']}}}
+        ]
         
         for attempt in range(max_retries):
             try:
+                config = configs[attempt] if attempt < len(configs) else self.ydl_opts_download
                 logger.info(f"Попытка скачивания {attempt + 1}/{max_retries}: {url}")
+                logger.info(f"Используется клиент: {config['extractor_args']['youtube']['player_client']}")
                 
-                with yt_dlp.YoutubeDL(self.ydl_opts_download) as ydl:
+                with yt_dlp.YoutubeDL(config) as ydl:
                     info = ydl.extract_info(url, download=True)
                     
                     if not info:
@@ -179,14 +217,28 @@ class YouTubeDownloader:
                     logger.warning(f"Файл не найден после попытки {attempt + 1}")
                     
             except Exception as e:
-                logger.error(f"Ошибка при попытке {attempt + 1}: {e}")
+                error_msg = str(e)
+                logger.error(f"Ошибка при попытке {attempt + 1}: {error_msg}")
+                
+                # Проверяем специфичные ошибки YouTube
+                if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
+                    logger.warning("YouTube требует аутентификацию, пробуем другой клиент...")
+                elif "Video unavailable" in error_msg:
+                    logger.error("Видео недоступно")
+                    return None
+                elif "Private video" in error_msg:
+                    logger.error("Приватное видео")
+                    return None
+                
                 if attempt == max_retries - 1:
+                    logger.error("Все попытки исчерпаны")
                     return None
                 
                 # Пауза перед повторной попыткой
                 import time
-                logger.info(f"Ожидание 2 секунды перед повторной попыткой...")
-                time.sleep(2)
+                wait_time = 2 + attempt  # Увеличиваем время ожидания
+                logger.info(f"Ожидание {wait_time} секунд перед повторной попыткой...")
+                time.sleep(wait_time)
         
         return None
     
