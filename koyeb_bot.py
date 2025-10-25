@@ -32,8 +32,20 @@ logger = logging.getLogger(__name__)
 # Токен бота (замените на ваш)
 BOT_TOKEN = "8353650126:AAGvR3EoPXWeyCMkDIB8gDR7NwXx1REMbwQ"
 
-# Инициализация бота и диспетчера
-bot = Bot(token=BOT_TOKEN)
+# Инициализация бота и диспетчера с настройками таймаутов
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiohttp import ClientTimeout
+
+# Создаем сессию с увеличенными таймаутами
+session = AiohttpSession(
+    timeout=ClientTimeout(
+        total=60,      # Общий таймаут
+        connect=30,    # Таймаут подключения
+        sock_read=30   # Таймаут чтения
+    )
+)
+
+bot = Bot(token=BOT_TOKEN, session=session)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -525,6 +537,9 @@ async def main():
     """Главная функция запуска бота"""
     logger.info("🚀 Запуск бота на Koyeb...")
     
+    web_runner = None
+    keep_alive_task = None
+    
     try:
         # Запускаем HTTP сервер для пингов
         web_runner = await start_web_server()
@@ -532,19 +547,64 @@ async def main():
         # Запускаем keep-alive в фоне
         keep_alive_task = asyncio.create_task(keep_alive())
         
-        # Удаляем старые обновления
-        await bot.delete_webhook(drop_pending_updates=True)
+        # Проверяем соединение с Telegram
+        try:
+            me = await asyncio.wait_for(bot.get_me(), timeout=15.0)
+            logger.info(f"✅ Подключение к Telegram успешно: @{me.username}")
+        except asyncio.TimeoutError:
+            logger.error("❌ Таймаут при подключении к Telegram")
+            return
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к Telegram: {e}")
+            return
+        
+        # Удаляем старые обновления с обработкой таймаута
+        try:
+            await asyncio.wait_for(
+                bot.delete_webhook(drop_pending_updates=True), 
+                timeout=10.0
+            )
+            logger.info("✅ Webhook удален успешно")
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ Таймаут при удалении webhook, продолжаем...")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка при удалении webhook: {e}, продолжаем...")
         
         logger.info("✅ Бот готов к работе!")
         
-        # Запускаем polling
-        await dp.start_polling(bot)
+        # Запускаем polling с обработкой ошибок
+        while True:
+            try:
+                await dp.start_polling(bot, skip_updates=True)
+            except Exception as e:
+                logger.error(f"❌ Ошибка polling: {e}")
+                logger.info("🔄 Перезапуск через 5 секунд...")
+                await asyncio.sleep(5)
         
+    except KeyboardInterrupt:
+        logger.info("👋 Получен сигнал остановки")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
     finally:
-        await bot.session.close()
+        logger.info("🛑 Завершение работы бота...")
+        
+        if keep_alive_task:
+            keep_alive_task.cancel()
+            try:
+                await keep_alive_task
+            except asyncio.CancelledError:
+                pass
+        
+        try:
+            await bot.session.close()
+        except:
+            pass
+            
         if web_runner:
-            await web_runner.cleanup()
-        keep_alive_task.cancel()
+            try:
+                await web_runner.cleanup()
+            except:
+                pass
 
 
 if __name__ == '__main__':
